@@ -1,0 +1,264 @@
+// ==UserScript==
+// @name 豆包UI自动化调试器 V3.0 (WebSocket音频捕获版)
+// @namespace http://tampermonkey.net/
+// @version 3.0
+// @description 整合版调试器，结合TTC的自动化功能和DAD的WebSocket音频录制技术。
+// @author You & AI Assistant
+// @match *://*.doubao.com/*
+// @grant GM_addStyle
+// @grant unsafeWindow
+// @license MIT
+// ==/UserScript==
+
+(function() {
+'use strict';
+
+// --- 配置区 ---
+const CONFIG = {
+INPUT_SELECTOR: 'textarea[data-testid="chat_input_input"]',
+ENABLED_SEND_BUTTON_SELECTOR: 'button[data-testid="chat_input_send_button"][aria-disabled="false"]',
+PLAY_BUTTON_SELECTOR: 'button[data-testid="audio_play_button"]',
+};
+
+// --- 全局状态变量 ---
+let isRecording = false;
+let audioChunks = [];
+const OriginalWebSocket = unsafeWindow.WebSocket; // 保存原始的WebSocket构造函数
+
+// UI元素引用
+let statusDisplay, executeButton, debugTextarea;
+
+// --- 创建整合UI界面 ---
+function createIntegratedUI() {
+const panel = document.createElement('div');
+panel.id = 'integrated-debug-panel';
+panel.innerHTML = `
+<div id="panel-header">豆包UI自动化调试器 V3.0</div>
+<textarea id="debug-textarea" placeholder="在此输入要测试的文本..."></textarea>
+<button id="execute-button">执行自动化</button>
+<div id="status-display">状态：待命中</div>
+`;
+document.body.appendChild(panel);
+
+// 获取UI元素引用
+statusDisplay = document.getElementById('status-display');
+executeButton = document.getElementById('execute-button');
+debugTextarea = document.getElementById('debug-textarea');
+
+// 绑定事件
+executeButton.addEventListener('click', runIntegratedTest);
+}
+
+// --- UI样式 ---
+GM_addStyle(`
+#integrated-debug-panel {
+position: fixed;
+bottom: 20px;
+right: 20px;
+width: 280px;
+background-color: #2c3e50;
+color: white;
+padding: 15px;
+border-radius: 10px;
+z-index: 9999;
+box-shadow: 0 4px 8px rgba(0,0,0,0.3);
+font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+display: flex;
+flex-direction: column;
+gap: 10px;
+}
+#panel-header {
+font-weight: bold;
+text-align: center;
+font-size: 14px;
+padding-bottom: 5px;
+border-bottom: 1px solid #7f8c8d;
+}
+#debug-textarea {
+width: 100%;
+height: 60px;
+box-sizing: border-box;
+padding: 8px;
+border: 1px solid #7f8c8d;
+border-radius: 5px;
+background-color: #34495e;
+color: white;
+resize: vertical;
+}
+#execute-button {
+background-color: #3498db;
+color: white;
+border: none;
+padding: 10px;
+border-radius: 5px;
+cursor: pointer;
+transition: background-color 0.2s;
+font-weight: bold;
+}
+#execute-button:hover {
+background-color: #2980b9;
+}
+#execute-button:disabled {
+background-color: #95a5a6;
+cursor: not-allowed;
+}
+#status-display {
+font-size: 12px;
+text-align: center;
+padding: 5px;
+border-radius: 3px;
+background-color: #34495e;
+}
+`);
+
+// --- 高仿真输入函数 ---
+function nativeInput(element, text) {
+const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+nativeSetter.call(element, text);
+element.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// --- 辅助函数：等待元素出现 ---
+function waitForElement(selector, elementName, timeout = 10000) {
+return new Promise((resolve, reject) => {
+const interval = setInterval(() => {
+const elements = document.querySelectorAll(selector);
+if (elements.length > 0) {
+clearInterval(interval);
+resolve(elements);
+}
+}, 500);
+setTimeout(() => {
+clearInterval(interval);
+reject(new Error(`等待元素超时: ${elementName} (选择器: ${selector})`));
+}, timeout);
+});
+}
+
+// --- 更新状态显示 ---
+function updateStatus(message, color = 'white') {
+statusDisplay.textContent = message;
+statusDisplay.style.color = color;
+}
+
+// --- 开始WebSocket音频录制 ---
+function startWebSocketRecording() {
+isRecording = true;
+audioChunks = [];
+updateStatus('状态：WebSocket录制中... (0块)', '#e67e22');
+console.log('%c[音频录制] WebSocket录制已启动', 'color: green; font-weight: bold;');
+}
+
+// --- 停止WebSocket音频录制并下载 ---
+function stopWebSocketRecording() {
+if (!isRecording) return;
+isRecording = false;
+
+if (audioChunks.length === 0) {
+updateStatus('状态：未捕获到音频数据', '#e74c3c');
+console.log('%c[音频录制] 未捕获到音频数据', 'color: red; font-weight: bold;');
+return;
+}
+
+// 合并音频块并下载
+const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+const url = URL.createObjectURL(audioBlob);
+const a = document.createElement('a');
+a.style.display = 'none';
+a.href = url;
+const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+a.download = `ggw-audio-${timestamp}.wav`;
+document.body.appendChild(a);
+a.click();
+window.URL.revokeObjectURL(url);
+document.body.removeChild(a);
+
+updateStatus(`状态：音频下载成功! (${audioChunks.length}块)`, '#2ecc71');
+console.log(`%c[音频录制] 下载成功! 共${audioChunks.length}个音频块`, 'color: green; font-weight: bold;');
+}
+
+// --- 核心整合测试函数 ---
+async function runIntegratedTest() {
+const textToTest = debugTextarea.value;
+if (!textToTest) {
+alert("请输入要测试的文本！");
+return;
+}
+
+executeButton.disabled = true;
+updateStatus('状态：正在执行自动化...', 'orange');
+console.clear();
+console.log(`%c[GGW调试开始] 测试文本: "${textToTest}"`, "color: blue; font-weight: bold;");
+
+try {
+// 步骤1: 输入并发送文本
+console.log("步骤1: 输入并发送文本...");
+const inputArea = (await waitForElement(CONFIG.INPUT_SELECTOR, "输入框"))[0];
+nativeInput(inputArea, textToTest);
+const sendButton = (await waitForElement(CONFIG.ENABLED_SEND_BUTTON_SELECTOR, "可用的发送按钮"))[0];
+sendButton.click();
+console.log(" - 已发送文本√");
+
+// 步骤2: 启动WebSocket音频录制
+console.log("步骤2: 启动WebSocket音频录制...");
+startWebSocketRecording();
+
+// 步骤3: 等待并点击播放按钮
+console.log("步骤3: 等待并点击【最新的】播放按钮...");
+const allPlayButtons = await waitForElement(CONFIG.PLAY_BUTTON_SELECTOR, "播放按钮", 15000);
+const latestPlayButton = allPlayButtons[allPlayButtons.length - 1];
+latestPlayButton.click();
+console.log(" - 已点击播放按钮√ (WebSocket录制进行中)");
+
+// 步骤4: 等待音频播放完成后停止录制
+console.log("步骤4: 等待10秒后自动停止录制...");
+updateStatus('状态：播放中，等待录制完成...', '#f1c40f');
+
+// 等待10秒让音频播放完成
+await new Promise(r => setTimeout(r, 10000));
+
+// 停止录制并下载
+stopWebSocketRecording();
+
+console.log("%c[GGW调试成功] 自动化流程完成！", "color: green; font-weight: bold;");
+updateStatus('状态：执行成功！', 'green');
+
+} catch (e) {
+console.error("【GGW调试失败】", e.message);
+updateStatus(`状态：失败！(${e.message})`, 'red');
+isRecording = false; // 确保录制状态重置
+} finally {
+executeButton.disabled = false;
+// 3秒后重置状态
+setTimeout(() => {
+if (statusDisplay.textContent.includes('成功') || statusDisplay.textContent.includes('失败')) {
+updateStatus('状态：待命中', 'white');
+}
+}, 3000);
+}
+}
+
+// --- WebSocket拦截机制 (来自DAD.html) ---
+unsafeWindow.WebSocket = function(url, protocols) {
+// 创建真实的WebSocket实例
+const realWebSocket = protocols ? new OriginalWebSocket(url, protocols) : new OriginalWebSocket(url);
+
+// 添加消息监听器来捕获音频数据
+realWebSocket.addEventListener('message', (event) => {
+// 检查是否正在录制，以及消息是否为二进制数据
+if (isRecording && event.data instanceof Blob) {
+audioChunks.push(event.data);
+updateStatus(`状态：WebSocket录制中... (${audioChunks.length}块)`, '#e67e22');
+console.log(`[音频捕获] 已捕获第${audioChunks.length}个音频块`);
+}
+});
+
+// 返回真实的WebSocket实例，保持页面原有功能
+return realWebSocket;
+};
+
+// --- 启动脚本 ---
+console.log('%c[GGW脚本] 豆包UI自动化调试器 V3.0 已加载', 'color: blue; font-weight: bold;');
+createIntegratedUI();
+
+})();
